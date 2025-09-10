@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Movie Recommendations Dashboard — TMDb</title>
+<style>
+  :root{
+    --bg:#071328; --panel:#0b1824; --muted:#9fb0c6; --accent:#ff8a65; --card:#071726;
+    --glass: rgba(255,255,255,0.03);
+  }
+  html,body{height:100%;margin:0;font-family:Inter,Segoe UI,Roboto,Arial;color:#e6eef8;background:linear-gradient(180deg,var(--bg),#051423);-webkit-font-smoothing:antialiased;}
+  .app{max-width:1200px;margin:20px auto;display:grid;grid-template-columns:260px 1fr 360px;gap:16px;padding:12px;}
+  .panel{background:linear-gradient(180deg,var(--panel),#02121a);border-radius:12px;padding:12px;box-shadow:0 12px 48px rgba(0,0,0,0.6);min-height:520px}
+  header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}
+  header h1{margin:0;font-size:18px}
+  .muted{color:var(--muted);font-size:13px}
+  /* Sidebar (genres & key) */
+  .sidebar .group{margin-bottom:12px}
+  .input, .select {width:100%;padding:10px;border-radius:10px;background:transparent;border:1px solid rgba(255,255,255,0.06);color:inherit}
+  .genres{margin-top:10px;max-height:420px;overflow:auto;padding-right:6px}
+  .genre-item{padding:8px;border-radius:8px;cursor:pointer;margin-bottom:6px;border:1px solid transparent}
+  .genre-item:hover{background:var(--glass);border-color:rgba(255,255,255,0.04)}
+  .genre-item.active{background:linear-gradient(90deg,var(--accent),#ff6b6b);color:#061019;border-color:transparent}
+  /* Main - movie grid */
+  .toolbar{display:flex;gap:8px;align-items:center;margin-bottom:10px}
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+  .card{background:linear-gradient(180deg, rgba(0,0,0,0.12), rgba(255,255,255,0.02));border-radius:10px;padding:8px;border:1px solid rgba(255,255,255,0.03);overflow:hidden}
+  .poster{width:100%;height:240px;background:#05222b;border-radius:8px;display:block;object-fit:cover;box-shadow:0 8px 20px rgba(2,6,23,0.6)}
+  .card h3{margin:8px 0 4px 0;font-size:15px}
+  .card p{margin:0;font-size:13px;color:var(--muted);height:56px;overflow:hidden}
+  .card .meta{display:flex;justify-content:space-between;align-items:center;margin-top:8px}
+  .btn{padding:8px 10px;border-radius:8px;border:0;background:linear-gradient(90deg,var(--accent),#ff7b50);color:#061018;cursor:pointer;font-weight:600}
+  .btn.ghost{background:transparent;color:var(--muted);border:1px solid rgba(255,255,255,0.04)}
+  /* Details panel */
+  .details .preview{width:100%;height:360px;background:#03141a;border-radius:10px;display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative}
+  .preview img{width:100%;height:100%;object-fit:cover}
+  .meta-line{display:flex;justify-content:space-between;gap:8px;margin-top:8px}
+  .small{font-size:13px;color:var(--muted)}
+  /* responsiveness */
+  @media (max-width:1100px){.app{grid-template-columns:220px 1fr}}
+  @media (max-width:740px){.app{grid-template-columns:1fr;}.grid{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<div style="max-width:1300px;margin:14px auto;padding:0 12px;color:#e6eef8">
+  <div style="display:flex;justify-content:space-between;align-items:center">
+    <div><h2 style="margin:0">Movie Recommendations Dashboard</h2><div class="muted">Browse movies by genre (up to 100 per genre). Provide a TMDb API key to load real posters & descriptions.</div></div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <button id="btnClearCache" class="btn ghost">Clear Cache</button>
+      <button id="btnHow" class="btn ghost">How it works</button>
+    </div>
+  </div>
+</div>
+
+<div class="app">
+  <!-- Sidebar -->
+  <aside class="panel sidebar">
+    <div class="group">
+      <label class="small">TMDb API Key</label>
+      <input id="apiKey" class="input" placeholder="Paste your TMDB API key (v3 or read token)"/>
+      <div class="muted" style="margin-top:6px">Get an API key at <a href="https://www.themoviedb.org/settings/api" target="_blank" style="color:#9ae6b4">themoviedb.org/settings/api</a>. For production, proxy on server to hide key. See docs. :contentReference[oaicite:4]{index=4}</div>
+    </div>
+
+    <div class="group">
+      <label class="small">Search / Filter</label>
+      <input id="searchInput" class="input" placeholder="Search titles in current genre..." />
+    </div>
+
+    <div class="group">
+      <label class="small">Genres</label>
+      <div id="genres" class="genres muted">Loading genres…</div>
+    </div>
+    <div style="margin-top:8px" class="muted small">Tip: click a genre. The app will fetch up to 100 movies for that genre by paging the discover endpoint. :contentReference[oaicite:5]{index=5}</div>
+  </aside>
+
+  <!-- Main grid -->
+  <main class="panel" style="display:flex;flex-direction:column">
+    <div class="toolbar">
+      <div style="flex:1;display:flex;gap:8px">
+        <button id="btnLoad" class="btn">Load Genre (100)</button>
+        <label class="small" style="align-self:center;color:var(--muted)">Results: <span id="count">0</span></label>
+      </div>
+      <div style="display:flex;gap:8px">
+        <select id="sortSelect" class="select small">
+          <option value="popularity.desc">Popular</option>
+          <option value="release_date.desc">Newest</option>
+          <option value="vote_average.desc">Top Rated</option>
+        </select>
+      </div>
+    </div>
+
+    <div id="gridWrap" style="flex:1;overflow:auto">
+      <div id="grid" class="grid"></div>
+    </div>
+
+  </main>
+
+  <!-- Details / preview -->
+  <aside class="panel details">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <div>
+        <div class="small">Selected poster</div>
+        <div id="selTitle" style="font-weight:700;margin-top:4px">No selection</div>
+      </div>
+      <div>
+        <button id="btnDownload" class="btn ghost">Download Image</button>
+        <button id="btnSelect" class="btn">Use Image</button>
+      </div>
+    </div>
+
+    <div class="preview" id="preview">
+      <div class="muted small">Poster preview will appear here</div>
+    </div>
+
+    <div class="meta-line">
+      <div class="small">Selected resolution: <span id="imgSize">—</span></div>
+      <div class="small">Movies loaded: <span id="loadedCount">0</span></div>
+    </div>
+
+    <div style="margin-top:10px" class="small muted">Click a movie card to view details and select its poster. You can then download or use the selected image.</div>
+
+  </aside>
+</div>
+
+<script>
+/*
+  Movie Recommendation Dashboard (single-file)
+  - Uses TMDb API to fetch genres and movies by genre (discover)
+  - Fetches up to ~100 movies per genre by paginating (5 pages * 20 = 100)
+  - Builds poster URLs using /configuration (image base_url + size + file_path)
+  - Allows searching inside the loaded genre, selecting an image (preview + download)
+  - Caches results in sessionStorage per genre to avoid repeated API hits during a session
+  - NOTE: You must paste your TMDb API Key above to fetch real data. For production, proxy requests server-side.
+  - Sources: TMDb API (configuration/images, genre list, discover). See docs links in the UI. :contentReference[oaicite:6]{index=6}
+*/
+
+const state = {
+  apiKey: '',
+  config: null,           // holds TMDB configuration (images.base_url and sizes)
+  genres: [],             // {id,name}
+  selectedGenre: null,
+  movies: [],             // current loaded movies for selected genre
+  currentPosterBase: '',  // e.g. https://image.tmdb.org/t/p/
+  posterSize: 'w500',     // chosen poster size from available sizes
+  cachePrefix: 'tmdb_cache_v1__'  // per-session cache key prefix
+};
+
+// DOM
+const el = {
+  apiKey: document.getElementById('apiKey'),
+  genres: document.getElementById('genres'),
+  btnLoad: document.getElementById('btnLoad'),
+  grid: document.getElementById('grid'),
+  count: document.getElementById('count'),
+  searchInput: document.getElementById('searchInput'),
+  preview: document.getElementById('preview'),
+  selTitle: document.getElementById('selTitle'),
+  imgSize: document.getElementById('imgSize'),
+  loadedCount: document.getElementById('loadedCount'),
+  btnDownload: document.getElementById('btnDownload'),
+  btnSelect: document.getElementById('btnSelect'),
+  sortSelect: document.getElementById('sortSelect'),
+  btnClearCache: document.getElementById('btnClearCache'),
+  btnHow: document.getElementById('btnHow'),
+  status: document.getElementById('status'),
+  roomLink: document.getElementById('roomLink'),
+  loadedCountLabel: document.getElementById('loadedCount'),
+  countLabel: document.getElementById('count')
+};
+
+// helper: show transient status
+function setStatus(s, transient=false) {
+  el.status.textContent = s;
+  if (transient) setTimeout(()=> { if (el.status.textContent === s) el.status.textContent = ''; }, 3000);
+}
+
+// Build full image URL: base + size + path
+function buildImageUrl(path, size) {
+  if (!path) return null;
+  const base = state.config && state.config.images && state.config.images.secure_base_url ? state.config.images.secure_base_url : 'https://image.tmdb.org/t/p/';
+  size = size || state.posterSize || 'w500';
+  return `${base}${size}${path}`;
+}
+
+// Utility: fetch wrapper with key
+async function tmdbGet(endpoint, params = {}) {
+  if (!state.apiKey) throw new Error('TMDb API key missing');
+  const url = new URL(`https://api.themoviedb.org/3/${endpoint}`);
+  // allow passing a complete query map
+  Object.entries(Object.assign({ api_key: state.apiKey, language: 'en-US' }, params)).forEach(([k,v])=>{
+    if (v !== undefined && v !== null) url.searchParams.set(k, v);
+  });
+  const res = await fetch(url.toString());
+  if (!res.ok) {
+    const text = await res.text().catch(()=>'');
+    throw new Error(`TMDb ${endpoint} failed: ${res.status} ${res.statusText} ${text}`);
+  }
+  return res.json();
+}
+
+// Load TMDB configuration (for images)
+async function loadConfig() {
+  state.config = await tmdbGet('configuration');
+  // choose a sensible poster size (prefer w500, otherwise highest available)
+  const sizes = state.config.images.poster_sizes || [];
+  state.posterSize = sizes.includes('w500') ? 'w500' : (sizes[sizes.length-1] || 'original');
+  el.imgSize.textContent = state.posterSize;
+}
+
+// Load genres
+async function loadGenres() {
+  el.genres.innerHTML = 'Loading genres…';
+  const data = await tmdbGet('genre/movie/list');
+  state.genres = data.genres || [];
+  renderGenres();
+}
+
+// Render genre list
+function renderGenres() {
+  el.genres.innerHTML = '';
+  state.genres.forEach(g=>{
+    const btn = document.createElement('div');
+    btn.className = 'genre-item muted';
+    btn.textContent = `${g.name}`;
+    btn.addEventListener('click', async () => {
+      document.querySelectorAll('.genre-item').forEach(x=>x.classList.remove('active'));
+      btn.classList.add('active');
+      state.selectedGenre = g;
+      el.count.textContent = '0';
+      el.grid.innerHTML = '';
+      el.searchInput.value = '';
+      // try load from cache first
+      const cached = sessionStorage.getItem(state.cachePrefix + `genre_${g.id}`);
+      if (cached) {
+        try {
+          state.movies = JSON.parse(cached);
+          renderGrid();
+          setStatus(`Loaded ${state.movies.length} movies from session cache`, true);
+          return;
+        } catch(e){ sessionStorage.removeItem(state.cachePrefix + `genre_${g.id}`); }
+      }
+      // else fetch
+      await loadGenreMovies(g.id);
+    });
+    el.genres.appendChild(btn);
+  });
+}
+
+// Fetch up to ~100 movies for a genre by paging discover/movie
+async function loadGenreMovies(genreId) {
+  if (!state.apiKey) { setStatus('Please enter TMDb API key above', false); return; }
+  setStatus('Fetching movies — this may take 5–15s for 100 items (paged).');
+  const movies = [];
+  const perPage = 20; // TMDb default
+  const maxItems = 100;
+  const maxPages = Math.ceil(maxItems / perPage);
+  let page = 1;
+  const sortBy = el.sortSelect.value || 'popularity.desc';
+  try {
+    for (; page <= maxPages; page++) {
+      const data = await tmdbGet('discover/movie', { with_genres: genreId, page, sort_by: sortBy, include_adult: false });
+      if (!data || !data.results) break;
+      for (const m of data.results) {
+        // map relevant fields
+        movies.push({
+          id: m.id,
+          title: m.title || m.name || 'Untitled',
+          overview: m.overview || '',
+          poster_path: m.poster_path,
+          backdrop_path: m.backdrop_path,
+          release_date: m.release_date || m.first_air_date || '',
+          vote_average: m.vote_average || 0
+        });
+        if (movies.length >= maxItems) break;
+      }
+      if (movies.length >= maxItems) break;
+      if (page >= data.total_pages) break;
+    }
+    state.movies = movies;
+    // cache in sessionStorage to avoid re-fetch during this browser session
+    try { sessionStorage.setItem(state.cachePrefix + `genre_${genreId}`, JSON.stringify(movies)); } catch(e){/* ignore storage errors */ }
+    renderGrid();
+    setStatus(`Loaded ${movies.length} movies for genre (cached in session)`, true);
+  } catch (err) {
+    console.error(err);
+    setStatus('Failed to fetch movies: ' + err.message);
+  }
+}
+
+// Render grid
+function renderGrid() {
+  el.grid.innerHTML = '';
+  const movies = state.movies || [];
+  el.count.textContent = movies.length;
+  el.loadedCount.textContent = movies.length;
+  const q = el.searchInput.value.trim().toLowerCase();
+  const filtered = movies.filter(m => !q || (m.title && m.title.toLowerCase().includes(q)) || (m.overview && m.overview.toLowerCase().includes(q)));
+  for (const m of filtered) {
+    const card = document.createElement('div'); card.className = 'card';
+    const img = document.createElement('img'); img.className = 'poster';
+    img.alt = m.title;
+    img.loading = 'lazy';
+    const posterUrl = buildImageUrl(m.poster_path) || '';
+    img.src = posterUrl || '';
+    img.onerror = () => { img.src = 'data:image/svg+xml;utf8,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="400" height="600"><rect fill="#05222b" width="100%" height="100%"/><text x="50%" y="50%" fill="#84a9c0" font-size="18" font-family="Arial" dominant-baseline="middle" text-anchor="middle">No image</text></svg>`); };
+    card.appendChild(img);
+
+    const title = document.createElement('h3'); title.textContent = m.title; card.appendChild(title);
+    const p = document.createElement('p'); p.textContent = m.overview || 'No description available.'; card.appendChild(p);
+
+    const meta = document.createElement('div'); meta.className = 'meta';
+    const left = document.createElement('div'); left.className = 'small muted'; left.textContent = (m.release_date || '—').slice(0,4);
+    meta.appendChild(left);
+    const btn = document.createElement('button'); btn.className = 'btn'; btn.textContent = 'Select image';
+    btn.onclick = () => selectMovie(m);
+    meta.appendChild(btn);
+    card.appendChild(meta);
+
+    // click whole card to open details
+    card.addEventListener('click', () => selectMovie(m));
+
+    el.grid.appendChild(card);
+  }
+}
+
+// Select a movie (show preview + enable download)
+let currentSelection = null;
+function selectMovie(m) {
+  currentSelection = m;
+  el.selTitle.textContent = `${m.title} (${(m.release_date||'—').slice(0,4)})`;
+  // show highest quality available (use poster size or original)
+  const url = buildImageUrl(m.backdrop_path || m.poster_path, state.posterSize) || '';
+  el.preview.innerHTML = '';
+  if (url) {
+    const img = document.createElement('img');
+    img.src = url;
+    img.onload = () => { /* nice */ };
+    img.onerror = () => { el.preview.innerHTML = '<div class="muted small">Preview not available</div>'; };
+    el.preview.appendChild(img);
+  } else {
+    el.preview.innerHTML = '<div class="muted small">Poster not available</div>';
+  }
+  el.imgSize.textContent = state.posterSize;
+  // enable download button
+  el.btnDownload.disabled = !url;
+  el.btnSelect.disabled = !url;
+}
+
+// Download image (fallback: open in new tab)
+el.btnDownload.addEventListener('click', () => {
+  if (!currentSelection) return alert('Select a movie first');
+  const p = currentSelection.backdrop_path || currentSelection.poster_path;
+  if (!p) return alert('No image available');
+  const url = buildImageUrl(p, state.posterSize);
+  // fetch blob then trigger download
+  fetch(url).then(r=>r.blob()).then(blob=>{
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = (currentSelection.title || 'poster') + '.jpg';
+    document.body.appendChild(a); a.click(); a.remove();
+  }).catch(()=> { window.open(url, '_blank'); });
+});
+
+// "Use image" stub: you could integrate chosen image into your app; here we show a toast
+el.btnSelect.addEventListener('click', () => {
+  if (!currentSelection) return alert('Select a movie first');
+  alert(`Selected image for "${currentSelection.title}". You can now download or use it in your app.`);
+});
+
+// Search input live filter
+el.searchInput.addEventListener('input', () => renderGrid());
+
+// Clear cache
+el.btnClearCache.addEventListener('click', () => {
+  Object.keys(sessionStorage).forEach(k => { if (k.startsWith(state.cachePrefix)) sessionStorage.removeItem(k); });
+  setStatus('Session cache cleared', true);
+});
+
+// How it works dialog (simple)
+el.btnHow.addEventListener('click', () => {
+  alert('This dashboard uses TMDb API (https://developer.themoviedb.org). Enter your API key, click a genre, and the app will page the discover endpoint to load up to 100 movies (5 pages). Images use TMDb /configuration to assemble URLs. For production hide the API key server-side.');
+});
+
+// main: wire API key input and load initial data
+(async function init(){
+  // prefill apiKey if present in localStorage
+  const savedKey = localStorage.getItem('tmdb_api_key_v1');
+  if (savedKey) { el.apiKey.value = savedKey; state.apiKey = savedKey; }
+  // if no key, we still allow browsing nothing; user must add key
+  el.apiKey.addEventListener('change', async () => {
+    const v = el.apiKey.value.trim();
+    state.apiKey = v;
+    localStorage.setItem('tmdb_api_key_v1', v);
+    try {
+      await loadConfig();
+      await loadGenres();
+      setStatus('Configuration & genres loaded', true);
+    } catch (err) {
+      console.error(err);
+      setStatus('Failed to load config/genres: ' + err.message);
+    }
+  });
+
+  // sort select re-loads current genre
+  el.sortSelect.addEventListener('change', async () => {
+    if (!state.selectedGenre) return;
+    // clear cached to refetch
+    sessionStorage.removeItem(state.cachePrefix + `genre_${state.selectedGenre.id}`);
+    await loadGenreMovies(state.selectedGenre.id);
+  });
+
+  // Load config/genres if key present at start
+  if (state.apiKey) {
+    try { await loadConfig(); await loadGenres(); setStatus('Ready', true); }
+    catch(e) { setStatus('Error initializing: ' + e.message); }
+  } else {
+    // show placeholder genres (we can still show empty skeleton)
+    el.genres.innerHTML = '<div class="muted small">Enter API key above to load genres from TMDb.</div>';
+    setStatus('Enter TMDb API key to fetch real movies');
+  }
+
+  // load button
+  el.btnLoad.addEventListener('click', async ()=>{
+    if (!state.selectedGenre) return alert('Pick a genre first');
+    if (!state.apiKey) return alert('Enter your TMDb API key first');
+    // clear cache for this genre then fetch
+    sessionStorage.removeItem(state.cachePrefix + `genre_${state.selectedGenre.id}`);
+    await loadGenreMovies(state.selectedGenre.id);
+  });
+
+})();
+</script>
+
+<!-- Citations: TMDb API docs used for configuration (images), genre list, and discover endpoints. -->
+<!-- Image basics & building urls: https://developer.themoviedb.org/docs/image-basics -->
+<!-- Genre list endpoint: https://developer.themoviedb.org/reference/genre-movie-list -->
+<!-- Discover movie endpoint: https://developer.themoviedb.org/reference/discover-movie -->
+<!-- How to get an API key: https://developer.themoviedb.org/docs/authentication-application -->
+</body>
+</html>
