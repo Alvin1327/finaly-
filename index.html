@@ -1,0 +1,285 @@
+// server.js
+// Authoritative Node.js server for 2-player shooter
+// Usage:
+//   npm init -y
+//   npm i express socket.io
+//   node server.js
+//
+// Serves static files from ./public and exposes Socket.IO
+
+const express = require('express');
+const app = express();
+const http = require('http').createServer(app);
+const io = require('socket.io')(http, { pingInterval: 20000, pingTimeout: 60000 });
+
+const PORT = process.env.PORT || 3000;
+app.use(express.static('public'));
+
+// Game config (must match client canvas sizes)
+const WORLD_W = 1200;
+const WORLD_H = 680;
+const PLAYER_SIZE = 36;
+const MAX_HP = 100;
+const FIRE_COOLDOWN = 300; // ms
+const BULLET_SPEED = 900; // px/sec
+const RESPAWN_MS = 1400;
+const TICK_RATE = 60; // server physics tick
+const BROADCAST_RATE = 20; // send authoritative snapshots per second
+
+// Simple covers (same layout as client)
+const COVERS = [
+  { x: 200, y: 220, w: 260, h: 28 },
+  { x: 680, y: 120, w: 36, h: 260 },
+  { x: 420, y: 420, w: 300, h: 40 },
+  { x: 60,  y: 520, w: 160, h: 36 },
+  { x: 960, y: 300, w: 160, h: 36 }
+];
+
+// Rooms: Map roomId -> roomState
+const rooms = new Map();
+
+function now() { return Date.now(); }
+
+function rectOverlap(a,b){ return !(a.x + a.w < b.x || a.x > b.x + b.w || a.y + a.h < b.y + b.h); }
+
+function spawnPoint() {
+  // returns {x,y} inside bounds
+  return { x: 120 + Math.random() * (WORLD_W - 240), y: 80 + Math.random() * (WORLD_H - 160) };
+}
+
+function makeRoom(id) {
+  return {
+    id,
+    players: {}, // socketId -> player {id,x,y,vx,vy,ang,hp,alive,score,lastShot,inputs}
+    bullets: {}, // bulletId -> {id,x,y,vx,vy,owner,created}
+    nextBulletId: 1,
+    lastTick: now(),
+  };
+}
+
+// physics helpers
+function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+
+// create / get room
+function getRoom(roomId) {
+  if (!rooms.has(roomId)) rooms.set(roomId, makeRoom(roomId));
+  return rooms.get(roomId);
+}
+
+// server tick: advance physics
+function tickRoom(room, dt) {
+  // update players based on inputs (simple velocity model)
+  const players = room.players;
+  const bullets = room.bullets;
+
+  for (const id in players) {
+    const p = players[id];
+    if (!p.alive) continue;
+    // use stored input (p.inputs keeps last client inputs)
+    const inp = p.inputs || {};
+    let dx=0, dy=0;
+    if (inp.up) dy -= 1;
+    if (inp.down) dy += 1;
+    if (inp.left) dx -= 1;
+    if (inp.right) dx += 1;
+    if (dx !== 0 || dy !== 0) {
+      const len = Math.hypot(dx,dy) || 1;
+      const speed = 220; // px/sec
+      const nx = p.x + (dx/len) * speed * dt;
+      const ny = p.y + (dy/len) * speed * dt;
+      // check cover collision
+      const box = { x: nx - PLAYER_SIZE/2, y: ny - PLAYER_SIZE/2, w: PLAYER_SIZE, h: PLAYER_SIZE };
+      let blocked = false;
+      for (const c of COVERS) {
+        if (rectOverlap(box, c)) { blocked = true; break; }
+      }
+      if (!blocked) {
+        p.x = clamp(nx, 20, WORLD_W - 20);
+        p.y = clamp(ny, 20, WORLD_H - 20);
+      }
+    }
+    // update facing (server trusts client angle if provided)
+    if (typeof inp.ang === 'number') p.ang = inp.ang;
+    // shooting (client sends shoot events, but server also allows server-side shoot cooldown check)
+    // handled when 'shoot' message arrives (below) creating bullets
+  }
+
+  // update bullets
+  for (const bid in bullets) {
+    const b = bullets[bid];
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+    // out of bounds
+    if (b.x < -20 || b.x > WORLD_W + 20 || b.y < -20 || b.y > WORLD_H + 20) {
+      delete bullets[bid]; continue;
+    }
+    // bullet vs cover
+    let hitCover = false;
+    for (const c of COVERS) {
+      if (b.x > c.x && b.x < c.x + c.w && b.y > c.y && b.y < c.y + c.h) { hitCover = true; break; }
+    }
+    if (hitCover) { delete bullets[bid]; continue; }
+    // bullet vs players (authoritative)
+    for (const pid in players) {
+      const pl = players[pid];
+      if (!pl.alive) continue;
+      if (pl.id === b.owner) continue;
+      const dx = b.x - pl.x, dy = b.y - pl.y;
+      const r2 = (PLAYER_SIZE * 0.6) * (PLAYER_SIZE * 0.6);
+      if (dx*dx + dy*dy <= r2) {
+        // hit!
+        pl.hp -= 34;
+        if (pl.hp <= 0) {
+          pl.alive = false;
+          // award shooter
+          const shooter = players[b.owner];
+          if (shooter) shooter.score = (shooter.score || 0) + 1;
+          // respawn victim after delay
+          setTimeout(() => {
+            if (pl) {
+              pl.hp = MAX_HP;
+              pl.alive = true;
+              const sp = spawnPoint();
+              pl.x = sp.x; pl.y = sp.y;
+            }
+          }, RESPAWN_MS);
+        }
+        // remove bullet
+        delete bullets[bid];
+        break;
+      }
+    }
+  }
+}
+
+// broadcast snapshots at BROADCAST_RATE
+setInterval(() => {
+  for (const [roomId, room] of rooms.entries()) {
+    // prepare snapshot
+    const playersSnapshot = {};
+    for (const id in room.players) {
+      const p = room.players[id];
+      playersSnapshot[id] = {
+        id: p.id,
+        x: p.x,
+        y: p.y,
+        ang: p.ang,
+        hp: p.hp,
+        alive: p.alive,
+        score: p.score || 0
+      };
+    }
+    const bulletsSnapshot = [];
+    for (const bid in room.bullets) {
+      const b = room.bullets[bid];
+      bulletsSnapshot.push({ x: b.x, y: b.y, owner: b.owner });
+    }
+    // broadcast to sockets in room
+    io.to(roomId).emit('snapshot', {
+      players: playersSnapshot,
+      bullets: bulletsSnapshot,
+      covers: COVERS,
+      ts: now()
+    });
+  }
+}, 1000 / BROADCAST_RATE);
+
+// server physics tick loop
+setInterval(() => {
+  const t = now();
+  for (const room of rooms.values()) {
+    const dt = (t - room.lastTick) / 1000;
+    room.lastTick = t;
+    tickRoom(room, dt);
+  }
+}, 1000 / TICK_RATE);
+
+// Socket.IO handlers
+io.on('connection', (socket) => {
+  console.log('conn', socket.id);
+
+  socket.on('joinRoom', (roomId) => {
+    if (!roomId) roomId = 'default';
+    socket.join(roomId);
+    const room = getRoom(roomId);
+
+    // create player in room
+    const sp = spawnPoint();
+    room.players[socket.id] = {
+      id: socket.id,
+      x: sp.x, y: sp.y, ang: 0,
+      hp: MAX_HP, alive: true, score: 0,
+      lastShot: 0,
+      inputs: {}
+    };
+
+    // send ack + initial state
+    socket.emit('joined', { id: socket.id, world: { w: WORLD_W, h: WORLD_H }, covers: COVERS });
+    // notify others about new player through snapshot (we'll broadcast soon)
+    console.log(`Player ${socket.id} joined ${roomId}`);
+  });
+
+  socket.on('input', (payload) => {
+    // payload: { roomId, up, down, left, right, ang }
+    const room = getRoom(payload.roomId);
+    if (!room) return;
+    const p = room.players[socket.id];
+    if (!p) return;
+    // store inputs (authoritative)
+    p.inputs = {
+      up: !!payload.up,
+      down: !!payload.down,
+      left: !!payload.left,
+      right: !!payload.right,
+      ang: typeof payload.ang === 'number' ? payload.ang : p.ang
+    };
+  });
+
+  socket.on('shoot', (payload) => {
+    // payload: { roomId, ang, x, y }
+    const room = getRoom(payload.roomId);
+    if (!room) return;
+    const p = room.players[socket.id];
+    if (!p || !p.alive) return;
+    const nowTS = now();
+    if (nowTS - p.lastShot < FIRE_COOLDOWN) return; // enforce cooldown server-side
+    p.lastShot = nowTS;
+    // create bullet at payload x,y or near player
+    const ang = (typeof payload.ang === 'number') ? payload.ang : p.ang;
+    const bx = (typeof payload.x === 'number') ? payload.x : p.x + Math.cos(ang) * (PLAYER_SIZE/2 + 8);
+    const by = (typeof payload.y === 'number') ? payload.y : p.y + Math.sin(ang) * (PLAYER_SIZE/2 + 8);
+    const bid = 'b' + (room.nextBulletId++);
+    room.bullets[bid] = {
+      id: bid,
+      x: bx, y: by,
+      vx: Math.cos(ang) * BULLET_SPEED,
+      vy: Math.sin(ang) * BULLET_SPEED,
+      owner: socket.id,
+      created: nowTS
+    };
+  });
+
+  socket.on('respawnRequest', (roomId) => {
+    const room = getRoom(roomId);
+    if (!room) return;
+    const p = room.players[socket.id];
+    if (!p) return;
+    p.hp = MAX_HP; p.alive = true;
+    const sp = spawnPoint();
+    p.x = sp.x; p.y = sp.y;
+  });
+
+  socket.on('disconnect', () => {
+    console.log('disconnect', socket.id);
+    // remove from any rooms and delete player
+    for (const room of rooms.values()) {
+      if (room.players[socket.id]) {
+        delete room.players[socket.id];
+      }
+    }
+  });
+});
+
+http.listen(PORT, () => {
+  console.log(`Server listening on http://localhost:${PORT}`);
+});
